@@ -55,7 +55,7 @@ pip install -r requirements.txt
 python3 check.py
 ```
 
-`check.py` takes about 20 seconds on one thread, and `--slow` adds repeat and resume. The kill test's commands and failure numbers are in [EXPERIMENTS.md](EXPERIMENTS.md). To run the whole method with Claude Code, use the [auto-research skill](.claude/skills/auto-research/SKILL.md).
+`check.py` takes about 15 seconds on one thread, and `--slow` adds repeat and resume. The kill test's commands and failure numbers are in [EXPERIMENTS.md](EXPERIMENTS.md). To run the whole method with Claude Code, use the [auto-research skill](.claude/skills/auto-research/SKILL.md).
 
 | Tier | Encoder width, predictor width | Training steps | Trajectories | Samples, search steps | Purpose |
 |---|---|---|---|---|---|

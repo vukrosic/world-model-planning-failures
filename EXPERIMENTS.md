@@ -27,9 +27,9 @@ Each paper changes one part, on the tasks where that part fails, and blames it. 
 
 ## Boring explanations to rule out
 
-1. Failures are just distance. Every score is split by the goal's offset (25, 50, 75 blocks of the expert's path).
+1. Failures are just distance. Every score is split by the goal's offset (25, 50 and 75 simulator steps of a noisy expert).
 2. A slot's credit is only planner noise. `noise.flip` is the share of episodes that flip when only the planner's noise changes.
-3. The model never saw those states. `cover` and `auc.cover` measure how far the start is from the training data.
+3. The model never saw those states. `cover` and `auc.cover` measure how far the goal is from the training data.
 4. The cost slot's credit is the probe's error. With a learned predictor, the true cost reads states through a probe, so `probe.r2` is recorded and Rule 2 refuses a call under .5.
 5. The result depends on the success threshold. `success2x` repeats every cell at twice the threshold.
 6. The result depends on how the true cost was shaped. `--shape 0` removes the pull towards the point behind the disk.
