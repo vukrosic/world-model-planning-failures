@@ -16,6 +16,7 @@ RA, RB, RS = 0.05, 0.07, 0.03; WALL, DOOR = 0.03, 0.14; LINK = 0.22; DRIFT = 0.0
 SHAPE = 0.1  # the pull towards the point behind the disk in the true cost; --shape changes it, to test how much the cost slot depends on this choice
 THR = {"reach": 0.05, "rooms": 0.06, "push": 0.06, "small": 0.05, "wind": 0.06}; SDIM = {"reach": 2, "rooms": 2, "push": 4, "small": 10, "wind": 4}; BLIND = {"reach": 0, "rooms": 0, "push": 1, "small": 1, "wind": 1}
 RBS = {"push": RB, "small": RS, "wind": RB}
+PACE = {"reach": 0.25, "rooms": 0.25, "push": 1.0, "small": 1.0, "wind": 1.0}  # the goal walker's speed. At full speed it crosses reach and rooms inside 25 steps and stops, so the offset would not measure distance. check.py tests that distance grows with offset on every task
 _X, _Y = np.meshgrid((np.arange(IMG) + 0.5) / IMG, (np.arange(IMG) + 0.5) / IMG)
 
 
@@ -100,13 +101,13 @@ def target(task, s, rng):
 
 
 def episodes(task, n, seed, split):
-    """Each split draws from its own stream, so tune, report and hidden episodes never share a start. Goals are states a noisy expert reached at the given offset, and episodes where the goal already holds are dropped, so no episode succeeds by doing nothing."""
+    """Each split draws from its own stream, so tune, report and hidden episodes never share a start. Goals are states a noisy expert reached at the given offset, walking at PACE, and episodes where the goal already holds are dropped."""
     assert split in ("tune", "report", "final"); rng = np.random.default_rng([seed, {"tune": 11, "report": 22, "final": 33}[split], TASKS.index(task)]); E = {}
     for off in OFFSETS:
         S, G = [], []; have = 0
         for _ in range(12):
             m = max(4 * n, 64); s0 = init(task, rng, m); s = s0.copy(); t = target(task, s, rng)
-            for _ in range(off // SKIP): s = block(task, s, expert(task, s, t) + rng.normal(0, 0.3, (m, 2)))
+            for _ in range(off // SKIP): s = block(task, s, PACE[task] * (expert(task, s, t) + rng.normal(0, 0.3, (m, 2))))
             keep = dist(task, s0, s) > 2 * THR[task]; S.append(s0[keep]); G.append(s[keep]); have += keep.sum()
             if have >= n: break
         S, G = np.concatenate(S)[:n], np.concatenate(G)[:n]; E[off] = (S, G)

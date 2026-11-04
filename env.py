@@ -4,14 +4,14 @@ One row trains a pixel model and a state model on one task, fits a probe and a g
 Scores per cell are success, success at twice the threshold, and final distance. Nothing is combined. Items go to runs/*.npz.
 Faults are the known answers: blind masks the object channel in training and planning (encoder), noact zeroes the action going into the predictor (predictor), flip gives the latent cost another episode's goal (cost), tiny cuts the search to 3 samples and 1 step (search).
 --strength s grades a fault: the object is dimmed to 1 - s, the action is scaled by 1 - s, the goal is mixed s of the way to another episode's, and the search keeps 1 - s of its samples and steps. 1 is the full fault.
---shape changes the true cost's pull towards the point behind the disk. --stand replaces training with a perfect stand-in (latent is the true state, predictor is the true task), so the planner, cells and attribution can be tested in seconds.
+--shape changes the true cost's pull towards the point behind the disk, and its rows go to results_tag.jsonl so they never compete in tuning. --state-lr trains the state model at its own lr: tune.dist.state shows when it needs one, and pixel cells stay identical because the pixel model trains first. --stand replaces training with a perfect stand-in (latent is the true state, predictor is the true task), so the planner, cells and attribution can be tested in seconds.
 --final uses hidden episodes and writes final_results.jsonl. Nothing should do this before a design is chosen.
 """
 import argparse, json, os, pickle, time
 import numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 import world as W, model as Mo, plan as Pl, attrib as At, diag as Di
 
-HERE = os.path.dirname(os.path.abspath(__file__)); FAULTS = ("blind", "noact", "flip", "tiny")
+HERE = os.path.dirname(os.path.abspath(__file__)); FAULTS = ("blind", "noact", "flip", "tiny"); DEFAULT_SHAPE = W.SHAPE
 BASE = dict(sub=4, T=20)
 TIERS = {
     "7s": dict(BASE, steps=25, batch=8, nt=24, T=8, w=4, pw=32, eps=2, n=12, iters=2, elite=3, mult=2, fit=20, nodes=40),
@@ -81,6 +81,17 @@ def run_cell(task, E, name, c, models, ngc, fault, world, diags=None, st=1.0):
     return np.concatenate(ok).astype(np.float32), np.concatenate(ok2).astype(np.float32), np.concatenate(dist).astype(np.float32)
 
 
+def floors(task, E, world):
+    """Success with no model at all, counted at plan ends as run_cell does: holding still, and random plans. Wind moves the disk by itself, so holding still can succeed, and a learned model only earns what it adds above these."""
+    idle, rand = [], []; rng = np.random.default_rng([world, 55, W.TASKS.index(task)])
+    for off, (S, G) in E.items():
+        for out, make in ((idle, lambda M: np.zeros((M, W.H, 2))), (rand, lambda M: rng.uniform(-1, 1, (M, W.H, 2)))):
+            s = S.copy(); hit = np.zeros(len(S), bool)
+            for _ in range(replans(off)): s = W.rollout(task, s, make(len(S)))[:, -1]; hit |= W.dist(task, s, G) < W.THR[task]
+            out.append(hit)
+    return np.concatenate(idle).astype(np.float32), np.concatenate(rand).astype(np.float32)
+
+
 def _diag(D, off, task, m, s, G, pop, c_pop, plan, traj, gen, fault, st):
     B, k = pop.shape[:2]; x = np.repeat(s, k, 0); f = pop.flatten(0, 1).numpy().astype(np.float64); G2 = np.repeat(G, k, 0)
     for t in range(W.H): x = W.block(task, x, f[:, t])
@@ -123,7 +134,7 @@ def attach(m, task, X, U, c, world):
 
 
 def row(a):
-    t00 = time.time(); c = TIERS[a.tier]; task = a.task; deadline = t00 + a.max_seconds if a.max_seconds else 0; torch.manual_seed(a.world); np.random.seed(a.world); name = f"{a.tier}_{task}_{a.method}_{a.budget}_lr{a.lr:g}_k{a.knob:g}_w{a.world}" + (f"_{a.fault}" if a.fault else "") + (f"_s{a.strength:g}" if a.strength != 1 else "") + (f"_{a.tag}" if a.tag else ""); runs = os.path.join(HERE, "runs"); os.makedirs(runs, exist_ok=True); part = os.path.join(runs, "part_" + name + ".pkl")
+    t00 = time.time(); c = TIERS[a.tier]; task = a.task; deadline = t00 + a.max_seconds if a.max_seconds else 0; torch.manual_seed(a.world); np.random.seed(a.world); name = f"{a.tier}_{task}_{a.method}_{a.budget}_lr{a.lr:g}_k{a.knob:g}_w{a.world}" + (f"_{a.fault}" if a.fault else "") + (f"_s{a.strength:g}" if a.strength != 1 else "") + (f"_shape{a.shape:g}" if a.shape != DEFAULT_SHAPE else "") + (f"_slr{a.state_lr:g}" if a.state_lr else "") + (f"_{a.tag}" if a.tag else ""); runs = os.path.join(HERE, "runs"); os.makedirs(runs, exist_ok=True); part = os.path.join(runs, "part_" + name + ".pkl")
     steps = 0 if a.budget == "untrained" else c["steps"]; ratio = speed_ratio(a.method, a.tier)
     if a.budget == "compute":
         if not ratio: raise SystemExit("run speed.py first: --budget compute needs speed.json")
@@ -134,7 +145,7 @@ def row(a):
     else:
         X, U = W.collect(task, c["nt"], c["T"], a.world); frames = torch.from_numpy((np.stack([W.render(task, x) for x in X.astype(np.float64).transpose(1, 0, 2)], 1) * 255).astype(np.uint8)); cap = Mo.cap_weights(c, task)
         for e, kind in (("l", "pix"), ("o", "state")):
-            m = Mo.build(a.method, task, kind, c, mask=mask if kind == "pix" else None); m.strength = a.strength; mse[e], auxw = train(m, a.method, task, kind, X, U, frames, c, a.lr, a.knob, steps, a.world, os.path.join(runs, f"ck_{name}_{kind}.pt") if a.max_seconds else None, deadline); m.requires_grad_(False)
+            m = Mo.build(a.method, task, kind, c, mask=mask if kind == "pix" else None); m.strength = a.strength; mse[e], auxw = train(m, a.method, task, kind, X, U, frames, c, a.state_lr if a.state_lr and kind == "state" else a.lr, a.knob, steps, a.world, os.path.join(runs, f"ck_{name}_{kind}.pt") if a.max_seconds else None, deadline); m.requires_grad_(False)
             r2[e] = attach(m, task, X, U, c, a.world); idx = torch.randperm(X.shape[0] * X.shape[1])[:c["nodes"]]
             with torch.no_grad(): nodes = enc(m, X.reshape(-1, X.shape[-1])[idx.numpy()]); ngc[e] = Pl.NGC(nodes)
             models[e] = m
@@ -142,29 +153,31 @@ def row(a):
     t_train = time.time() - t0; split = "final" if a.final else "report"; Etune, Erep = W.episodes(task, c["eps"], a.world, "tune"), W.episodes(task, c["eps"], a.world, split); done = pickle.load(open(part, "rb")) if a.max_seconds and os.path.exists(part) else {}; D = {}
     cells = At.CELLS + ([] if a.stand else list(FIX)); t0 = time.time(); cell_s = {}
     with torch.no_grad():
-        for n in cells + [REPEAT, "tune"]:
+        for n in cells + [REPEAT, "tune", "tune.state"]:
             if n in done: continue
             if deadline and time.time() > deadline: pickle.dump(done, open(part, "wb")); raise TimeoutError
             if n[1:3] == "oo" and n[0] == "o" and "l" + n[1:] in done: done[n] = done["l" + n[1:]]; continue  # with the true predictor and true cost the encoder is unused, so the outcome is the same by construction
-            tc = time.time(); done[n] = run_cell(task, Etune if n == "tune" else Erep, At.LL if n in (REPEAT, "tune") else n, c, models, ngc, a.fault, a.world, diags=REPEAT if n == REPEAT else D if n == At.LL else None, st=a.strength)
+            tc = time.time(); done[n] = run_cell(task, Etune if n in ("tune", "tune.state") else Erep, At.LL if n in (REPEAT, "tune") else "olll" if n == "tune.state" else n, c, models, ngc, a.fault, a.world, diags=REPEAT if n == REPEAT else D if n == At.LL else None, st=a.strength)
             cell_s[n] = round(time.time() - tc, 2)
             if n == At.LL: done["_diag"] = D
     D = done.pop("_diag"); t_plan = time.time() - t0; v = {n: done[n][0] for n in At.CELLS}; off = np.concatenate([[o] * len(Erep[o][0]) for o in Erep]); sc = {}; it = {"offset": off}
     for n in cells:
         s1, s2, d = done[n]; sc[f"success.{n}"], sc[f"success2x.{n}"], sc[f"dist.{n}"] = float(s1.mean()), float(s2.mean()), float(d.mean()); it[f"success.{n}"], it[f"success2x.{n}"], it[f"dist.{n}"] = s1, s2, d
         for o in Erep: sc[f"success.{n}.o{o}"] = float(s1[off == o].mean())
-    fail = done[At.LL][0] < 0.5; sc["noise.flip"] = float((done[REPEAT][0] != done[At.LL][0]).mean()); sc["tune.dist"], sc["tune.success"] = float(done["tune"][2].mean()), float(done["tune"][0].mean())
+    fail = done[At.LL][0] < 0.5; sc["noise.flip"] = float((done[REPEAT][0] != done[At.LL][0]).mean()); sc["tune.dist"], sc["tune.success"] = float(done["tune"][2].mean()), float(done["tune"][0].mean()); sc["tune.dist.state"] = float(done["tune.state"][2].mean()); sc["noise.credit"] = At.noise_sd(sc["noise.flip"], len(off)); it["success.idle"], it["success.random"] = floors(task, Erep, a.world); sc["success.idle"], sc["success.random"] = float(it["success.idle"].mean()), float(it["success.random"].mean())
     phi = At.shapley(v); top, zg = At.top_z(phi)
     for s in At.SLOTS: sc[f"shap.{s}"] = float(phi[s].mean()); it[f"shap.{s}"] = phi[s]
-    sc.update({f"label.{k}": x for k, x in At.labels(v).items()}); sc.update({f"pair.{k}": float(x.mean()) for k, x in At.interactions(v).items()}); sc["shap.top_z"] = zg
-    if not a.stand: sc.update({"pred.mse": mse["l"], "probe.r2": r2["l"], "probe.r2.state": r2["o"]})
+    sc.update({f"label.{k}": x for k, x in At.labels(v).items()}); sc["shap.top_z"] = zg
+    for k, x in At.interactions(v).items(): sc[f"pair.{k}"] = float(x.mean()); it[f"pair.{k}"] = x
+    for k, x in At.solo(v).items(): sc[f"solo.{k}"] = float(x.mean()); it[f"solo.{k}"] = x
+    if not a.stand: sc.update({"pred.mse": mse["l"], "probe.r2": r2["l"], "probe.r2.state": r2["o"], "ngc.connected": ngc["l"].connected, "ngc.connected.state": ngc["o"].connected})
     for k in ("zero", "rank", "pred", "centroid", "ir", "sr"):
         if D[next(iter(D))][k]:
             x = np.concatenate([np.mean(D[o][k], 0) if k != "zero" else np.all(D[o][k], 0) for o in Erep]).astype(np.float32); it[f"diag.{k}"] = x; sc[f"diag.{k}"] = float(x.mean()); sc[f"auc.{k}"] = Di.auc(x if k not in ("rank", "centroid", "sr") else -x, fail)
     if fail.any(): sc["diag.zero_when_failed"] = float(it["diag.zero"][fail].mean())
     if not a.stand: Xa = X.reshape(-1, X.shape[-1]); g = np.concatenate([Erep[o][1] for o in Erep]); w = 4 if task == "small" else g.shape[1]; it["cover"] = np.sqrt(((g[:, None, :w] - Xa[None, :, :w]) ** 2).sum(-1)).min(1).astype(np.float32); sc["auc.cover"] = Di.auc(it["cover"], fail)
-    r = dict(method=a.method, task=task, tier=a.tier, lr=a.lr, knob=a.knob, world=a.world, budget=a.budget, fault=a.fault or "", strength=a.strength, tag=a.tag or "", shape=a.shape, final=bool(a.final), top=top, top_z=zg, steps=steps, test_weights=tw, aux_weights=auxw, cap=cap, n=len(off), H=W.H, search=dict(n=c["n"], iters=c["iters"], elite=c["elite"]), train_s=round(t_train, 1), plan_s=round(t_plan, 1), cell_s=cell_s, s_per_step=round(t_train / max(2 * steps, 1), 5), speed_ratio=ratio, scores={k: round(float(x), 5) for k, x in sc.items()})
-    np.savez_compressed(os.path.join(runs, ("final_" if a.final else "") + name + ".npz"), **it); fn = "final_results.jsonl" if a.final else "results_tag.jsonl" if a.tag or a.fault or a.stand else "results.jsonl"
+    r = dict(method=a.method, task=task, tier=a.tier, lr=a.lr, knob=a.knob, world=a.world, budget=a.budget, fault=a.fault or "", strength=a.strength, tag=a.tag or "", shape=a.shape, state_lr=a.state_lr, stand=bool(a.stand), final=bool(a.final), top=top, top_z=zg, steps=steps, test_weights=tw, aux_weights=auxw, cap=cap, n=len(off), H=W.H, search=dict(n=c["n"], iters=c["iters"], elite=c["elite"]), train_s=round(t_train, 1), plan_s=round(t_plan, 1), cell_s=cell_s, s_per_step=round(t_train / max(2 * steps, 1), 5), speed_ratio=ratio, scores={k: round(float(x), 5) for k, x in sc.items()})
+    np.savez_compressed(os.path.join(runs, ("final_" if a.final else "") + name + ".npz"), **it); fn = "final_results.jsonl" if a.final else "results_tag.jsonl" if a.tag or a.fault or a.stand or a.shape != DEFAULT_SHAPE else "results.jsonl"
     with open(os.path.join(HERE, fn), "a") as f: f.write(json.dumps(r) + "\n")
     for k in [part] + [os.path.join(runs, f"ck_{name}_{x}.pt") for x in ("pix", "state")]:
         if os.path.exists(k): os.remove(k)
@@ -172,7 +185,7 @@ def row(a):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(); p.add_argument("--method", default="lewm"); p.add_argument("--task", default="push"); p.add_argument("--tier", default="7s"); p.add_argument("--lr", type=float, default=1e-3); p.add_argument("--knob", type=float, default=1.0); p.add_argument("--budget", default="steps", choices=("steps", "compute", "untrained")); p.add_argument("--world", type=int, default=0); p.add_argument("--fault", choices=FAULTS); p.add_argument("--strength", type=float, default=1.0); p.add_argument("--shape", type=float, default=0.1); p.add_argument("--tag"); p.add_argument("--final", action="store_true"); p.add_argument("--stand", action="store_true"); p.add_argument("--max-seconds", type=float, default=0); a = p.parse_args()
+    p = argparse.ArgumentParser(); p.add_argument("--method", default="lewm"); p.add_argument("--task", default="push"); p.add_argument("--tier", default="7s"); p.add_argument("--lr", type=float, default=1e-3); p.add_argument("--knob", type=float, default=1.0); p.add_argument("--budget", default="steps", choices=("steps", "compute", "untrained")); p.add_argument("--world", type=int, default=0); p.add_argument("--state-lr", type=float, default=0.0); p.add_argument("--fault", choices=FAULTS); p.add_argument("--strength", type=float, default=1.0); p.add_argument("--shape", type=float, default=0.1); p.add_argument("--tag"); p.add_argument("--final", action="store_true"); p.add_argument("--stand", action="store_true"); p.add_argument("--max-seconds", type=float, default=0); a = p.parse_args()
     os.nice(19); torch.set_num_threads(1)
     try: r = row(a)
     except TimeoutError: raise SystemExit(f"stopped at --max-seconds {a.max_seconds:g}: the same command continues")

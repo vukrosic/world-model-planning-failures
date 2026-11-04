@@ -36,13 +36,14 @@ So a failure can come from any of the four parts, and recent papers each blame a
 |---|---|
 | **Tasks** | Five 2D tasks from images: `reach`, `rooms` (a wall with a door), `push`, `small` (a much smaller disk) and `wind` (a world effect that moves the disk). Each is aimed at one paper's failure. |
 | **16 cells** | Encoder, predictor, cost and search are each learned or oracle, so every episode runs 16 ways with the same planner noise. Two more cells add the graph cost and a search started by a goal policy. |
-| **Oracles** | Encoder: the true state instead of pixels. Predictor: the true task. Cost: the true path to the goal. Search: 16 times the samples, started with expert plans. |
-| **Credit** | Each part's Shapley credit per episode, which adds up exactly to the gap between `oooo` and `llll`. Each pair's interaction prints separately, because the gain from fixing one part depends on the others. |
+| **Oracles** | Encoder: the true state instead of pixels, which also swaps in the predictor, probe and graph trained on it, so this slot means what the model reads and the dynamics learned on that. Predictor: the true task. Cost: the true path to the goal. Search: 16 times the samples, started with expert plans. |
+| **Credit** | Each part's Shapley credit per episode, which adds up exactly to the gap between `oooo` and `llll`. Each pair's interaction prints separately, because the gain from fixing one part depends on the others. A part is called the bottleneck only if fixing it alone gains, and two parts that only work together are called as a pair. |
+| **Floors** | Holding still and random plans, counted the same way, so a model only earns what it adds above them. Success counts if the goal holds at any plan end, not only the last. |
 | **Planted faults** | Known answers, graded by `--strength`: `blind` hides the object from the encoder, `noact` removes actions from the predictor, `flip` gives the cost a wrong goal, `tiny` cuts the search. `faults.py` shows whether the credit names each one. |
 | **Published diagnostics** | Prediction error, the share of episodes with no sample at the goal, the cost's rank agreement with the true cost, Jacobian centroids, Invariance Radius and Separation Rate. `faults.py` shows which of them moves under which fault. |
 | **Baselines** | `lewm`, `pldm`, `frozen` and `lewmidm` share an encoder and predictor at test, and differ only in their training loss. Each searches the same learning rates and the same `--knob`. |
 | **Controls** | `broken` sees a blank image and must earn nothing. `wide` has twice the width and must be visible. |
-| **Rules** | `kill.py` is the kill test, `claims.py` holds published comparisons by direction, `audit.py` decides which scores can judge, and `beat.py` holds the win rule and the rule for calling a part the bottleneck, both committed before any comparison ran. |
+| **Rules** | `kill.py` is the kill test with a null test first, `claims.py` holds published comparisons by direction, `audit.py` decides which scores can judge, and `beat.py` holds the win rule and the rule for calling a part the bottleneck, both committed before any comparison ran. `test_rules.py` runs them on made-up rows in under a second. |
 
 Scores are saved per episode and split by the goal's offset, with no combined number. Hidden episodes sit behind `--final`. A new world model is one row in `model.py`, and a new cost or search is one more cell in `env.py`.
 
@@ -75,16 +76,19 @@ Tier names are targets, and only `7s` has been timed.
 **It can't judge** what happens on the real simulators these papers use, because no adapter is written yet. It says nothing about ViT encoders, history longer than 1, or models that act from a learned policy, such as Dreamer.
 
 > [!WARNING]
-> - **Nothing has run at a real size.** The rule scripts have only read 7-second rows, so their thresholds are unexercised.
+> - **Nothing has run at a real size.** The rule scripts have only read 7-second rows and made-up rows, so their thresholds are unexercised on real ones.
 > - **The credit is against these oracles.** The search oracle is a larger search and not the true optimum, and the encoder oracle is a learned network on the true state. Change an oracle and the credit changes.
-> - **The encoder's credit is zero by construction when the predictor and the cost are both oracle,** so read the interactions as well as the totals.
+> - **A third of the encoder's Shapley weight is zero by construction,** because with the predictor and the cost both oracle the encoder is unused. So read `solo.E` and the interactions as well as the totals.
+> - **Goals are placed at a quarter of the expert's speed on `reach` and `rooms`.** The offset labels stay 25, 50 and 75, and the number of replans follows the label, so far goals on those tasks have more plans than their distance needs.
+> - **The graph-cost and goal-policy cells use the lr chosen on `llll`,** for every method, so they are not tuned on their own success.
+> - **`noise.flip` is measured in `llll` only,** and the credit's noise assumes the same share in every cell.
 > - **The true cost is a choice.** On `rooms` it is the path through the door, and on push tasks it adds a pull towards the point behind the disk. `--shape 0` removes the pull, and a credit that changes sign under it can't be claimed.
 > - **Data coverage isn't a part.** The `cover` score measures it, and a row with more data is the direct test.
 > - **Actions are held for 5 steps,** so the search space is smaller than LeWM's, where each block packs 5 different actions.
 > - **Only SIGReg comes from authors' code.** The other baselines are ports from formulas, and PLDM's term weights weren't in the papers read, so they start at 1 and the knob scales them.
 > - **Rank agreement is coarse with four baselines.**
 
-The full list of issues is in [reviews/pass-1.md](reviews/pass-1.md), [reviews/pass-2.md](reviews/pass-2.md) and [reviews/pass-3.md](reviews/pass-3.md).
+The full list of issues is in [reviews/pass-1.md](reviews/pass-1.md), [reviews/pass-2.md](reviews/pass-2.md), [reviews/pass-3.md](reviews/pass-3.md) and [reviews/pass-4.md](reviews/pass-4.md).
 
 ---
 

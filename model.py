@@ -32,7 +32,7 @@ class WM(nn.Module):
     """kind is pix (renders go in) or state (true state goes in, which is what the oracle encoder slot means)."""
 
     def __init__(s, task, kind, w, pw, mask=None):
-        super().__init__(); s.task, s.kind, s.mask = task, kind, mask; sd = W.SDIM[task]; d = LATENT
+        super().__init__(); s.task, s.kind, s.mask, s.strength = task, kind, mask, 1.0; sd = W.SDIM[task]; d = LATENT
         if kind == "pix": s.enc = nn.Sequential(nn.Conv2d(3, w, 4, 2, 1), nn.GELU(), nn.Conv2d(w, 2 * w, 4, 2, 1), nn.GELU(), nn.Conv2d(2 * w, 2 * w, 4, 2, 1), nn.GELU(), nn.Flatten(), nn.Linear(2 * w * 16, d))
         else: s.enc = mlp(_feat(task), 4 * w, d)
         s.pred = mlp(d + 2, pw, d)
@@ -41,7 +41,7 @@ class WM(nn.Module):
 
     def obs(s, x):
         """x is what the task gives: states for this model's kind. Returns a tensor ready for enc."""
-        if s.kind == "pix": im = torch.from_numpy(W.render(s.task, x)) if isinstance(x, np.ndarray) else x; return _mask(im, s.mask, s.task)
+        if s.kind == "pix": im = torch.from_numpy(W.render(s.task, x)) if isinstance(x, np.ndarray) else x; return _mask(im, s.mask, s.task, s.strength)
         t = torch.as_tensor(x, dtype=torch.float32); return _state(s.task, t) if t.shape[-1] == W.SDIM[s.task] else t
 
     def encode(s, x): return s.enc(s.obs(x))

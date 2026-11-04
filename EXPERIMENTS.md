@@ -27,24 +27,30 @@ Each paper changes one part, on the tasks where that part fails, and blames it. 
 
 ## Boring explanations to rule out
 
-1. Failures are just distance. Every score is split by the goal's offset (25, 50 and 75 simulator steps of a noisy expert).
-2. A slot's credit is only planner noise. `noise.flip` is the share of episodes that flip when only the planner's noise changes.
+1. Failures are just distance. Every score is split by the goal's offset (25, 50 and 75 steps of a noisy expert). On `reach` and `rooms` the expert walks at a quarter speed, because at full speed it arrives inside 25 steps and the offset stops measuring distance. `check.py` tests that goal distance rises by at least 1.3 times across offsets on every task, and that far `rooms` goals are mostly across the wall.
+2. A slot's credit is only planner noise. `noise.flip` is the share of episodes that flip when only the planner's noise changes, and `noise.credit` turns it into a credit's standard deviation. It is measured in `llll` only and assumed for the other cells.
 3. The model never saw those states. `cover` and `auc.cover` measure how far the goal is from the training data.
-4. The cost slot's credit is the probe's error. With a learned predictor, the true cost reads states through a probe, so `probe.r2` is recorded and Rule 2 refuses a call under .5.
+4. The cost slot's credit is the probe's error. With a learned predictor, the true cost reads states through a probe, so `probe.r2` and `probe.r2.state` are recorded and Rule 2 refuses a call under .5.
 5. The result depends on the success threshold. `success2x` repeats every cell at twice the threshold.
 6. The result depends on how the true cost was shaped. `--shape 0` removes the pull towards the point behind the disk.
 7. The result is a bigger search and not a better one. The search slot's oracle changes samples and starts together, and `beat.py` caps a design's search time.
+8. The task succeeds with no model. `success.idle` holds still and `success.random` runs random plans, with the same replans and the same counting at plan ends. The wind moves the disk by itself, so holding still can succeed.
+9. The encoder slot is the slowest to train. E=o swaps the encoder, predictor, probe and graph together, so the state model trains by its own tune score, `tune.dist.state`, and Rule 2 refuses a call if it is more than 5% from its best. `--state-lr` tunes it apart.
 
 ## Kill test: written before any comparison ran
 
-`kill.py` applies these. Nothing below has run at a real size. That is 44 rows at `5m`, a target of about 4 hours on one thread that hasn't been timed, and it shouldn't run on a busy laptop.
+`kill.py` applies these. Nothing below has run at a real size. That is about 50 rows at `5m`, a target of about 5 hours on one thread that hasn't been timed, and it shouldn't run on a busy laptop.
 
 ```bash
 python3 check.py --slow
 python3 speed.py 5m --seconds 300
 python3 jobs.py 5m --methods lewm --tasks reach rooms push small wind --lrs 0.0003 0.001 0.003
 python3 jobs.py 5m --methods lewmidm --tasks small --lrs 0.0003 0.001 0.003
-python3 jobs.py 5m --methods broken wide --tasks push --lrs 0.0003 0.001 0.003
+python3 jobs.py 5m --methods lewm --tasks reach rooms push small wind --lrs TUNED_LR --worlds 1 2
+python3 jobs.py 5m --methods lewmidm --tasks small --lrs TUNED_LR --worlds 1 2
+python3 jobs.py 5m --methods broken --tasks reach rooms push small wind --lrs 0.001
+python3 jobs.py 5m --methods wide --tasks push --lrs 0.0003 0.001 0.003
+python3 jobs.py 5m --methods wide --tasks push --lrs TUNED_LR --worlds 1 2
 # Then run each fault at the learning rate tune.dist picked for lewm on that task:
 python3 jobs.py 5m --methods lewm --tasks push --lrs PUSH_TUNED_LR --fault blind
 python3 jobs.py 5m --methods lewm --tasks push --lrs PUSH_TUNED_LR --fault noact
@@ -53,19 +59,24 @@ python3 jobs.py 5m --methods lewm --tasks push --lrs PUSH_TUNED_LR --fault tiny
 # Repeat the four fault lines for reach, rooms, small and wind.
 python3 kill.py --tier 5m
 python3 faults.py 5m
+python3 test_rules.py   # the rules on made-up rows, under a second
 ```
 
 | Test | Failure number | What failure means |
 |---|---|---|
+| N0: null test | fewer than 3 worlds of `lewm` | The largest gap between two worlds of one setting is the floor for every gain below, because a world changes data, weights and episodes. |
 | K0: everything oracle succeeds | under .9 on any task | The task or the horizon is wrong, so credit has no ceiling. |
-| K1: everything learned sits in the middle | between .1 and .9 on fewer than 2 tasks | There is nothing to attribute at this size. |
-| K2: the top credit is above planner noise | below `noise.flip` on every task | The attribution can't see past the noise. |
-| K3: planted faults are named | under 90% | The attribution can't be trusted at this size. |
-| K4: the published disagreement shows on `rooms` at the far offset | neither the graph cost nor the true predictor gains | The toy lacks the failure the papers argue about, so it can't settle them. |
-| K5: inverse dynamics beats LeWM on `small` | no gain | The published encoder fix isn't reproduced here. |
-| K6: controls | `broken` gets credit with z of 2 or more, or `wide` doesn't show with z of 2 | The test rewards a blank model, or it can't see model quality. |
+| K1: everything learned sits in the middle | between .1 and .9, and above holding still and random plans by z 2, on fewer than 2 tasks | There is nothing to attribute at this size. |
+| K2: the top credit is above planner noise | at most 2 x `noise.credit` on every task | The attribution can't see past the noise. |
+| K3: planted faults are named | under 90%, counted only at the healthy row's exact setting | The attribution can't be trusted at this size. |
+| K4: the published disagreement shows on `rooms` at offset 75 | the graph cost must gain with z of 2 and gain more than the true predictor with z of 2. Not judged if under 90% of nodes connect | The toy lacks the failure the papers argue about, so it can't settle them. |
+| K5: inverse dynamics beats LeWM on `small` | z under 2, or a fresh-world gap under the null floor. Not judged under 2 fresh worlds | The published encoder fix isn't reproduced here. |
+| K6: `broken` earns nothing | on any task, it beats random plans or `lewm` with z of 2 | The test rewards a blank model. |
+| K7: `wide` shows | as for K5, on `push` | The test can't see model quality. |
 
-Failing K0 to K5 at `5m` kills this size as a place to study the question, and `1h` has to run next. The question itself dies if K3 fails at `1h`, or if K4 and K5 fail there too and an adapter to the real simulators isn't worth building.
+A test with missing runs says not judged, and a missing run never passes. `test_rules.py` feeds made-up rows through these and the rules in `beat.py`.
+
+Failing K0 to K7 at `5m` kills this size as a place to study the question, and `1h` has to run next. The question itself dies if K3 fails at `1h`, or if K4 and K5 fail there too and an adapter to the real simulators isn't worth building.
 
 Designs tried so far: 0.
 
@@ -98,5 +109,6 @@ All runs lasted about 7 seconds per step at the `7s` tier, one process at a time
 | Diagnostics | Separation Rate read 2.0, because the diagonal held infinity. | The diagonal is excluded. |
 | `speed.py` | `frozen` was measured after pretraining only, which gave it about 4 times the steps it earned. | It now measures 3 pretraining rounds in 10, as in training. |
 | `claims.py` | It printed "holds" for 0.00 against 0.00. | A score at 0 or 1 prints "cannot tell". |
+| Goal distance by offset | At full walking speed `reach` goals sat at .39, .41, .40, and 12% to 8% of `rooms` goals stayed on the near side at every offset, so the offset measured nothing and K4's far offset wasn't far. | `reach` and `rooms` walk at .25, giving .18, .28, .35, and across-the-wall shares of 4%, 54%, 90%. |
 | Perfect stand-in, at the check's small search | On `push`, `llll` reaches .23 and `oooo` 1.00, so a perfect model with latent distance still fails, with credit .40 on the cost and .37 on the search. | Nothing to fix. It shows the slots separate without any learned model. |
 

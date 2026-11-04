@@ -2,7 +2,7 @@
 
 A failed check stops with the reason.
 """
-import argparse, json, os, subprocess, sys, time
+import argparse, json, math, os, subprocess, sys, time
 import numpy as np, torch
 import world as W, model as Mo, plan as Pl, attrib as At, diag as Di, env
 
@@ -30,12 +30,15 @@ for t in W.TASKS:
         s, g = E["report"][o]; x = s.copy(); hit = np.zeros(16, bool)
         for _ in range(env.replans(o) * W.H): x = W.block(t, x, W.expert(t, x, g)); hit |= W.dist(t, x, g) < W.THR[t]
         ok(hit.mean() >= (0.5 if t == "wind" else 0.9), f"{t} expert reaches {hit.mean():.2f} of offset {o} goals, so the budget or the expert is wrong")
-done("episodes and experts")
+for t in W.TASKS:
+    far = [float(W.true_cost(t, *W.episodes(t, 64, 0, "report")[o]).mean() if t == "rooms" else W.dist(t, *W.episodes(t, 64, 0, "report")[o]).mean()) for o in W.OFFSETS]; ok(far[0] < far[1] < far[2] and far[2] > 1.3 * far[0], f"{t} goals at offsets {W.OFFSETS} are at distances {far}, so the offset does not measure distance")
+E = W.episodes("rooms", 64, 0, "report"); cross = [float(((E[o][0][:, 0] < 0.5) != (E[o][1][:, 0] < 0.5)).mean()) for o in W.OFFSETS]; ok(cross[2] > 0.7 > 0.3 > cross[0], f"rooms goals across the wall by offset: {cross}, so far goals don't test the door"); done("episodes and experts")
 
 # Renders: the object is drawn, moving it changes the image, the fault removes it, and the state fits one frame.
 for t in W.TASKS:
     s, g = W.episodes(t, 4, 0, "report")[25]; ok(W.render(t, s).shape == (4, 3, 32, 32), "render shape"); ok(np.abs(W.render(t, s) - W.render(t, g)).sum((1, 2, 3)).min() > 0, f"{t} goal and start render the same"); m = Mo.build("lewm", t, "pix", dict(w=2, pw=8), mask="blind"); ok(m.obs(s)[:, W.BLIND[t]].abs().sum() == 0, f"{t} blind leaves the object")
     b = Mo.build("broken", t, "pix", dict(w=2, pw=8)); ok(b.obs(s).abs().sum() == 0, "broken still reads the image")
+s = W.episodes("push", 4, 0, "report")[25][0]; m = Mo.build("lewm", "push", "pix", dict(w=2, pw=8), mask="blind"); m.strength = 0.5; x = m.obs(s)[:, W.BLIND["push"]]; ok(np.isclose(float(x.max()), 0.5, atol=0.01), f"blind at strength .5 leaves the object at {float(x.max()):.2f}")
 ok(W.render("small", W.episodes("small", 1, 0, "report")[25][0])[0, 1].sum() < 12, "the small object is not small"); done("renders")
 
 # SIGReg: a Gaussian scores low, a collapsed latent scores high.
@@ -79,11 +82,13 @@ ok(np.isclose(Di.rank_corr(np.arange(8.0)[None], np.arange(8.0)[None])[0], 1), "
 # The planted faults on a perfect stand-in: with no training at all, the attribution must name each fault's slot, and everything oracle must succeed.
 env.TIERS["chk"] = dict(env.BASE, steps=0, batch=2, nt=2, T=4, w=2, pw=8, eps=8, n=48, iters=3, elite=6, mult=4, fit=1, nodes=4)
 import argparse as ap
-def stand(task, f, st=1.0): return env.row(ap.Namespace(method="lewm", task=task, tier="chk", lr=1e-3, knob=1.0, budget="steps", world=0, fault=f, tag="chk", final=False, stand=True, max_seconds=0, strength=st, shape=0.1))["scores"]
+def stand(task, f, st=1.0): return env.row(ap.Namespace(method="lewm", task=task, tier="chk", lr=1e-3, knob=1.0, budget="steps", world=0, fault=f, tag="chk", final=False, stand=True, max_seconds=0, strength=st, shape=0.1, state_lr=0.0))["scores"]
 h = stand("push", None); ok(h["success.oooo"] >= 0.9, f"oooo {h['success.oooo']:.2f} on the stand-in"); ok(abs(h["shap.E"]) <= 0.1 and abs(h["shap.P"]) <= max(h["noise.flip"], 0.1), f"a perfect encoder and predictor get credit: {h['shap.E']:.2f} {h['shap.P']:.2f}")
 for f, slot in (("blind", "E"), ("noact", "P"), ("flip", "C"), ("tiny", "S")):
     s = stand("push", f); gain = {x: s[f"shap.{x}"] - h[f"shap.{x}"] for x in "EPCS"}; ok(max(gain, key=gain.get) == slot, f"fault {f} named {max(gain, key=gain.get)}, {gain}"); ok(s["success.llll"] <= h["success.llll"], f"fault {f} did not hurt")
-done("planted faults on the stand-in")
+w = [math.factorial(k) * math.factorial(3 - k) / 24 for k in (0, 1, 1, 1, 2, 2, 2, 3)]; ok(np.isclose(2 * sum(x * x for x in w), 2 * At.NOISE_WEIGHT), "the credit's noise weight"); rng = np.random.default_rng(0); N = 400; base = {x: rng.random(N) < 0.5 for x in At.CELLS}; draws = [At.shapley({x: (base[x] ^ (rng.random(N) < 0.1 / 2)).astype(np.float32) for x in At.CELLS})["C"].mean() for _ in range(300)]; ok(0.7 < np.std(draws) / At.noise_sd(0.1, N) < 1.3, f"credit noise {np.std(draws):.4f} against the formula {At.noise_sd(0.1, N):.4f}")
+for f_ in ("idle", "random"): ok(f"success.{f_}" in h, f"no {f_} floor")
+I = W.episodes("push", 16, 0, "report"); ok(env.floors("push", I, 0)[0].mean() == 0, "holding still moved the disk to the goal"); ok(all(f"solo.{x}" in h for x in "EPCS") and "noise.credit" in h and "tune.dist.state" in h, "missing scores"); done("planted faults on the stand-in")
 
 if a.slow:
     cmd = [sys.executable, "env.py", "--method", "lewmidm", "--task", "rooms", "--tier", "7s", "--tag", "rep"]; run = lambda *x: subprocess.run(cmd + list(x), capture_output=True, text=True)

@@ -1,7 +1,7 @@
 """Which scores can judge, using published methods only, so designs can't shape the verdict. python3 audit.py TIER CHECK_TIER
 
 moved: share of methods whose score changed by 2 standard errors between an untrained row (--budget untrained) and training. spread: best minus worst method in standard errors of the episode-by-episode gap. lr rho: rank agreement across methods between the two lrs most methods tried. tier rho: rank agreement with the check tier. world rho: across fresh worlds. hidden rho: with the hidden episodes.
-Cut-offs, set before any table was read: moved >= 1/2, spread >= 3, lr rho >= .4, tier rho >= .3, world rho >= .4, hidden rho >= .4. With four baselines a rank agreement is coarse, which the README states. Missing checks do not count against a score and print as nan. Scores that pass both ways go in judges.json, which compare.py reads.
+Cut-offs, set before any table was read: moved >= 1/2, spread >= 3, lr rho >= .4, tier rho >= .3, world rho >= .4, hidden rho >= .4. With four baselines a rank agreement is coarse, which the README states. A score needs the lr, tier and world checks, so a missing one keeps it out. Only the hidden check may be missing, because hidden items are scored once at the end. By chance alone, rank agreement over 4 methods reaches .3 or .4 about 37% of the time, so each check is weak alone, and together the three pass by chance about 5% of the time if they were independent. Scores that pass both ways go in judges.json, which compare.py reads.
 """
 import argparse, collections, json, os
 import numpy as np
@@ -29,7 +29,7 @@ def table(T, T2):
             for m in ms:
                 if m in U and k in items(U[m]).files and f: e = I[m][k] - items(U[m])[k]; mv.append(abs(e.mean()) / max(e.std() / len(e) ** 0.5, 1e-9) >= 2)
             moved = float(np.mean(mv)) if mv else float("nan"); same = [m for m in A if m in C and k in A[m] and k in C[m]]; lr = rho([A[m][k] for m in same], [C[m][k] for m in same]); both = [m for m in ms if m in B2 and k in B2[m]["scores"]]; tr = rho([v[m] for m in both], [B2[m]["scores"][k] for m in both]); wo = [m for m in ms if m in W1 and k in W1[m]["scores"]]; wr = rho([v[m] for m in wo], [W1[m]["scores"][k] for m in wo])
-            F = {r["method"]: r["scores"] for r in final if r["tier"] == T and r["task"] == task and r["method"] in B and r["lr"] == B[r["method"]]["lr"] and k in r["scores"]}; hid = rho([v[m] for m in F], [F[m][k] for m in F]); ok = not moved < 0.5 and spread >= 3 and not lr < 0.4 and not tr < 0.3 and not wr < 0.4 and not hid < 0.4; good += [f"{task}/{k}"] * bool(ok)
+            F = {r["method"]: r["scores"] for r in final if r["tier"] == T and r["task"] == task and r["method"] in B and r["lr"] == B[r["method"]]["lr"] and k in r["scores"]}; hid = rho([v[m] for m in F], [F[m][k] for m in F]); ok = not moved < 0.5 and spread >= 3 and lr >= 0.4 and tr >= 0.3 and wr >= 0.4 and not hid < 0.4; good += [f"{task}/{k}"] * bool(ok)
             print(f"| {task}/{k} | {moved:.2f} | {spread:.1f} | {lr:.2f} | {tr:.2f} | {wr:.2f} | {hid:.2f} | {'yes' if ok else ''} |")
     print(f"| judges: {len(good)} |\n"); return good
 
